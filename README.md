@@ -22,12 +22,12 @@ temperature per readout (fitted on DecisionBench medium, so the medium "scaled" 
 The post's headline accuracies use each benchmark's own aggregate (per case log on DecisionBench, per
 task on BLINK); both aggregates are in `output/analysis.json`.
 
-| Benchmark | Questions | A − B | C − B | ECE A / B / C | ECE after one temperature A / B / C |
-|---|---:|---|---|---|---|
-| DecisionBench medium | 293 | +8.5 [+4.5, +12.9] | +2.4 [−2.3, +7.2] | 0.026 / 0.179 / 0.130 | 0.042 / 0.071 / 0.082 |
-| DecisionBench hard | 293 | +4.4 [+0.4, +8.3] | −0.3 [−4.8, +4.1] | 0.180 / 0.305 / 0.227 | 0.154 / 0.175 / 0.131 |
-| BLINK (val) | 1,901 | −0.5 [−2.7, +1.6] | −9.6 [−12.3, −6.9] | 0.093 / 0.226 / 0.387 | 0.064 / 0.039 / 0.233 |
-| MMStar | 1,498 | +0.6 [−1.3, +2.5] | −9.2 [−11.6, −6.7] | 0.142 / 0.279 / 0.355 | 0.109 / 0.100 / 0.212 |
+| Benchmark | Questions | A − B (what Jev-Omni buys) | A − C (the head on its own weights) | C − B | ECE A / B / C | ECE after one temperature A / B / C |
+|---|---:|---|---|---|---|---|
+| DecisionBench medium | 293 | +8.5 [+4.5, +12.9] | +6.1 [+2.9, +10.0] | +2.4 [−2.3, +7.2] | 0.026 / 0.179 / 0.130 | 0.042 / 0.071 / 0.082 |
+| DecisionBench hard | 293 | +4.4 [+0.4, +8.3] | +4.8 [+1.6, +8.1] | −0.3 [−4.8, +4.1] | 0.180 / 0.305 / 0.227 | 0.154 / 0.175 / 0.131 |
+| BLINK (val) | 1,901 | −0.5 [−2.7, +1.6] | +9.1 [+6.9, +11.4] | −9.6 [−12.3, −6.9] | 0.093 / 0.226 / 0.387 | 0.064 / 0.039 / 0.233 |
+| MMStar | 1,498 | +0.6 [−1.3, +2.5] | +9.8 [+7.5, +11.9] | −9.2 [−11.6, −6.7] | 0.142 / 0.279 / 0.355 | 0.109 / 0.100 / 0.212 |
 
 Temperatures: A 1.2, B 3.2, C 2.25. MMStar excludes the two questions whose keyed answer is the literal option "nan" (1,498 of 1,500).
 
@@ -43,7 +43,8 @@ Temperatures: A 1.2, B 3.2, C 2.25. MMStar excludes the two questions whose keye
 | `src/pod/pod_run_v2.sh` | the script that produced the published results on a RunPod L40S (expects `src/*.py` copied to `/workspace/bench`) |
 | `output/results/` | one record per question: id, gold option index, per-option probabilities, prediction, latency, token count. No question text and no images |
 | `output/checks.json` | the harness self-checks: Jev-Omni's published verification cases, the image-path equivalence check, the fp32 output-layer check, the KV-cache check, the skipped MMStar items |
-| `output/analysis.json` | the post's numbers |
+| `output/analysis.json` | the post's statistics |
+| `output/environment.json` | hardware, OS, cost, first-pass fault counts, and the model-configuration facts the post quotes, each with its source |
 | `notebooks/reanalysis.ipynb` | recomputes the tables from `output/results/` and checks them against `output/analysis.json`, no GPU |
 
 ## Reproduce

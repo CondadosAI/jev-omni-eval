@@ -208,6 +208,9 @@ if __name__ == "__main__":
         for a in arms:
             if a != "base" and (bench, a) in data and (bench, "base") in data:
                 entry[f"paired_{a}_vs_base"] = paired(bench, data[(bench, a)], data[(bench, "base")])
+        if (bench, "jev") in data and (bench, "jevdigits") in data:
+            # the head's own effect: the same fine-tuned weights, read through the head vs through digits
+            entry["paired_jev_vs_jevdigits"] = paired(bench, data[(bench, "jev")], data[(bench, "jevdigits")])
         if bench == "blink" and ("blink", "jev") in data:
             entry["per_task_jev_vs_base"] = blink_tasks(data[("blink", "jev")], data[("blink", "base")])
         out["benches"][bench] = entry

@@ -1,0 +1,35 @@
+{
+ "gpu": "NVIDIA L40S, 46,068 MiB",
+ "driver": "580.126.09",
+ "cpu": "AMD EPYC 9374F 32-Core Processor",
+ "cpus_visible_to_container": 128,
+ "host_ram_gb": 1511,
+ "os": "Ubuntu 24.04.3 LTS",
+ "python": "3.12",
+ "container_image": "runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404",
+ "source": "run_v2.log of the published run (nvidia-smi, lscpu, free -g, /etc/os-release)",
+ "sessions_total": 5,
+ "cost_usd_total": 3.09,
+ "cost_usd_published_run": 1.29,
+ "first_pass_input_faults": {
+  "blink_prompts_with_choice_list_left_in_stem": 561,
+  "mmstar_items_with_nan_options": 176,
+  "note": "found by review; every published number comes from the corrected run"
+ },
+ "gemma4_processor": {
+  "image_seq_length": 280,
+  "max_soft_tokens": 280,
+  "source": "google/gemma-4-12B-it@707f0a3b processor_config.json (Jev-Omni ships the identical file)"
+ },
+ "jev_omni_decision_config": {
+  "hidden_size": 3840,
+  "output_classes": 256,
+  "adapters_merged": [
+   "trained v1 rank128",
+   "lora-v1merged-n24000-r512-lr1e-05-eb32-w10-ddp4"
+  ],
+  "stage2_size": 24000,
+  "stage2_rank": 512,
+  "source": "akhilaaa3/Jev-Omni@5addda86 decision_config.json"
+ }
+}
