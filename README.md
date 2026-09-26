@@ -90,5 +90,7 @@ is redistributed here, and each keeps its own terms:
 | [BLINK](https://huggingface.co/datasets/BLINK-Benchmark/BLINK) (val) | `a3666eb2` | Apache-2.0 on the dataset card, which covers the annotations; the images come from existing datasets and web search with their own terms (the relative-depth photos are Flickr images from Depth in the Wild) |
 | [MMStar](https://huggingface.co/datasets/Lin-Chen/MMStar) | `bc98d668` | **No licence is stated on the dataset card.** Its images come from other benchmarks (SEED-Bench, MMBench, MathVista, AI2D, MMMU, ScienceQA) with their own terms |
 
+`output/cover-bg.png`, the background of the post's cover, contains an AI2D diagram (MMStar question 1285) by the Allen Institute for AI under CC BY-SA 4.0; that image keeps its licence.
+
 Jev-Omni states that it is not affiliated with, endorsed by, sponsored by, or derived from TypeSafe AI
 or its Jev model. Neither is this repository: it measures Jev-Omni, not Jev.
