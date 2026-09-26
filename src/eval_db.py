@@ -53,6 +53,17 @@ class Base:
         self.digit_ids = [tok.convert_tokens_to_ids(d) for d in DIGITS]
         self.prompt_fn, self.device = prompt_fn, device
         self.cache_ok = None  # decided on first multi-digit question by comparing to full recompute
+        self.checks = {}
+        # Read the LM head in fp32: in bf16 the logits near the softcap (30) are spaced 0.125 apart,
+        # which produced exact ties between options. The hook captures the last hidden state that
+        # enters lm_head; _logprobs recomputes the logits from it in fp32 and applies Gemma's softcap.
+        head = self.model.get_output_embeddings()
+        self._w32 = head.weight.detach().float()
+        self._b32 = head.bias.detach().float() if getattr(head, "bias", None) is not None else None
+        tcfg = getattr(cfg, "text_config", cfg)
+        self._softcap = getattr(tcfg, "final_logit_softcapping", None)
+        self._h = {}
+        head.register_forward_hook(lambda _m, a, _o: self._h.__setitem__("last", a[0][0, -1].detach()))
 
     def _inputs(self, state, question, options):
         content = [{"type": "text", "text": self.prompt_fn(state, question, options)}]
@@ -62,7 +73,16 @@ class Base:
         return {k: v.to(self.device) for k, v in inputs.items()}
 
     def _logprobs(self, logits):
-        return torch.log_softmax(logits.float(), -1)
+        """fp32 log-probabilities from the hidden state captured on the forward that produced `logits`."""
+        z = self._h["last"].float() @ self._w32.T
+        if self._b32 is not None:
+            z = z + self._b32
+        if self._softcap:
+            z = self._softcap * torch.tanh(z / self._softcap)
+        if "fp32_vs_model_max_abs_logit_diff" not in self.checks:  # once: fp32 path agrees with the model's own logits
+            self.checks["fp32_vs_model_max_abs_logit_diff"] = float((z - logits.float()).abs().max())
+            print(f"[base] fp32 LM head vs model bf16 logits: max |dz| = {self.checks['fp32_vs_model_max_abs_logit_diff']:.3f}", flush=True)
+        return torch.log_softmax(z, -1)
 
     @torch.inference_mode()
     def predict(self, state, question, options):
@@ -109,6 +129,7 @@ class Base:
                     ref = self._logprobs(self.model(**full, use_cache=False, logits_to_keep=1).logits[0, -1])
                     top = ref.topk(20).indices
                     err = (lp_cache[top].exp() - ref[top].exp()).abs().max().item()
+                    self.checks["kv_cache_vs_recompute_max_abs_dp_top20"] = err
                     self.cache_ok = err < 5e-3
                     print(f"[base] KV-cache continuation check: max |dp| over top-20 = {err:.2e} "
                           f"-> {'use cache' if self.cache_ok else 'full recompute'}", flush=True)
@@ -155,7 +176,28 @@ def load(which: str, device: str, base_repo=BASE_REPO, base_rev=BASE_REV):
     return Base(base_path, jev_omni._prompt, device=device), base_path
 
 
+def n_tokens(clf, q):
+    """Prompt length for the jev arm (its predict() builds the same chat-template input internally)."""
+    import jev_omni
+    content = [{"type": "text", "text": jev_omni._prompt(q["state"], q["question"], q["options"])}]
+    ids = clf.processor.apply_chat_template([{"role": "user", "content": content}], add_generation_prompt=True,
+                                            tokenize=True, return_dict=True, return_tensors="pt",
+                                            enable_thinking=False)["input_ids"]
+    return int(ids.shape[1])
+
+
+def warmup(which, clf, split: Path, n=2):
+    """Untimed forwards so the first recorded latency is not a cold start."""
+    q = next(questions(split))
+    for _ in range(n):
+        if which == "jev":
+            clf.predict(state=q["state"], question=q["question"], options=q["options"])
+        else:
+            clf.predict(q["state"], q["question"], q["options"])
+
+
 def run(which, clf, split: Path, out: Path, limit=None):
+    warmup(which, clf, split)
     done = set()
     if out.exists():
         done = {(r["id"], r["qkey"]) for r in map(json.loads, out.open())}
@@ -170,7 +212,7 @@ def run(which, clf, split: Path, out: Path, limit=None):
             t0 = time.perf_counter()
             if which == "jev":
                 r = clf.predict(state=q["state"], question=q["question"], options=q["options"])
-                probs, extra = [r["probabilities"][o] for o in q["options"]], {}
+                probs, extra = [r["probabilities"][o] for o in q["options"]], {"n_tokens": n_tokens(clf, q)}
                 if len(set(q["options"])) != len(q["options"]):
                     raise SystemExit(f"duplicate option strings in {q['id']}/{q['qkey']}")
             else:
@@ -179,6 +221,8 @@ def run(which, clf, split: Path, out: Path, limit=None):
                 torch.cuda.synchronize()
             ms = (time.perf_counter() - t0) * 1000
             pred = max(range(len(probs)), key=probs.__getitem__)
+            top2 = sorted(probs, reverse=True)[:2]
+            extra["tie"] = len(top2) == 2 and top2[0] == top2[1]  # argmax then resolves to the lower index
             rec = {"model": which, "split": split.stem, "id": q["id"], "qkey": q["qkey"], "type": q["type"],
                    "n_options": len(probs), "gold": q["gold"], "pred": pred, "confidence": probs[pred],
                    "p_gold": probs[q["gold"]], "correct": pred == q["gold"], "ms": round(ms, 2),
@@ -213,9 +257,13 @@ if __name__ == "__main__":
     a = ap.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
     clf, path = load(a.model, a.device, a.base_repo, a.base_rev)
+    checks = {"model": a.model, "weights": f"{a.base_repo}@{a.base_rev}" if a.model == "base" else f"{JEV_REPO}@{JEV_REV}"}
     if a.model == "jev":
-        w = verify_jev(clf, path)
-        (a.out / "jev_verification.json").write_text(json.dumps({"worst_abs_diff": w}))
+        checks["verification_worst_abs_dp"] = verify_jev(clf, path)
+        checks["verification_card_reference_worst_abs_dp"] = json.loads((Path(path) / "verification.json").read_text())["worst_abs_diff"]
     for s in a.splits:
         split = a.data / f"{s}.jsonl" if a.data else fetch_split(s)
         run(a.model, clf, split, a.out / f"{a.model}_{s}.jsonl", a.limit)
+    if a.model == "base":
+        checks.update(clf.checks)
+    (a.out / f"checks_db_{a.model}.json").write_text(json.dumps(checks, indent=1))

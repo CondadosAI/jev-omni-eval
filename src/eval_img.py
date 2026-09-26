@@ -35,7 +35,9 @@ def blink_questions(tasks):
             images = [Image.open(io.BytesIO(r[f"image_{i}"]["bytes"])).convert("RGB")
                       for i in range(1, 5) if r[f"image_{i}"] is not None]
             # The `prompt` field carries the framing multi-image questions need; drop its choice list.
-            stem = re.split(r"\n\s*Select from the following choices", r["prompt"])[0].strip()
+            # Two wordings occur ("choices" / "options"), sometimes after a space instead of a newline.
+            stem = re.split(r"\s*Select from the following (?:choices|options)\.?", r["prompt"])[0].strip()
+            assert not re.search(r"\([A-D]\)", stem), f"choice list left in the stem of {r['idx']}"
             letter = r["answer"].strip("() ")
             n = len(images)
             state = "One image is attached." if n == 1 else f"{n} images are attached, in order (first to last)."
@@ -62,14 +64,24 @@ def parse_mmstar(text):
     return question, options
 
 
+MMSTAR_SKIPPED = []  # ids whose keyed answer is a literal "nan" option (unanswerable)
+
+
 def mmstar_questions():
+    """MMStar pads some items with literal "nan" options (e.g. "C: nan, D: nan"). They are dropped and the
+    gold index remapped, as VLMEvalKit does; items whose keyed answer is itself "nan" are skipped."""
     path = hf_hub_download(MMSTAR_REPO, "mmstar.parquet", repo_type="dataset", revision=MMSTAR_REV)
     for _, r in pd.read_parquet(path).iterrows():
         question, options = parse_mmstar(r["question"])
+        gold = "ABCDEF".index(r["answer"].strip())
+        if options[gold] == "nan":
+            MMSTAR_SKIPPED.append(f"mmstar-{r['index']}")
+            continue
+        keep = [i for i, o in enumerate(options) if o != "nan"]
         yield {"id": f"mmstar-{r['index']}", "task": r["category"], "l2": r["l2_category"],
                "images": [Image.open(io.BytesIO(r["image"] if isinstance(r["image"], bytes) else r["image"]["bytes"])).convert("RGB")],
-               "state": "One image is attached.", "question": question, "options": options,
-               "gold": "ABCDEF".index(r["answer"].strip())}
+               "state": "One image is attached.", "question": question, "options": [options[i] for i in keep],
+               "gold": keep.index(gold), "n_options_source": len(options)}
 
 
 STATE_VARIANTS = {  # robustness: the default state text is ours, not the model author's
@@ -102,24 +114,44 @@ def jev_probs(clf, inputs, n):
 def base_probs(base, inputs, n):
     assert n <= 9, "single-digit readout only"
     logits = base.model(**inputs, use_cache=False, logits_to_keep=1).logits[0, -1]
-    lp = torch.log_softmax(logits.float(), -1)
+    lp = base._logprobs(logits)  # fp32 LM head (see eval_db.Base)
     sel = lp[[base.digit_ids[k + 1] for k in range(n)]]
     return torch.softmax(sel.double(), 0).tolist(), sel.exp().sum().item()
 
 
-def check_jev_equivalence(clf, q, prompt_fn, device):
-    """Our input path must reproduce Jev-Omni's own predict() on a single-image question."""
-    with tempfile.NamedTemporaryFile(suffix=".png") as f:
-        q["images"][0].save(f.name)
-        ref = clf.predict(state=q["state"], question=q["question"], options=q["options"],
-                          media=f.name, modality="image")
-    ours = jev_probs(clf, make_inputs(clf.processor, q["images"],
-                                      prompt_fn(q["state"], q["question"], q["options"]), device),
-                     len(q["options"]))
-    diff = max(abs(a - ref["probabilities"][o]) for a, o in zip(ours, q["options"]))
-    print(f"[jev] image-path equivalence vs official predict(): max |dp| = {diff:.2e}", flush=True)
-    if diff > 1e-3:
+def check_jev_equivalence(clf, items, prompt_fn, device):
+    """Our input path must reproduce Jev-Omni's own predict() on single-image questions. (Jev-Omni has no
+    official multi-image path other than video, so multi-image inputs cannot be checked this way.)"""
+    worst = 0.0
+    for q in items:
+        with tempfile.NamedTemporaryFile(suffix=".png") as f:
+            q["images"][0].save(f.name)
+            ref = clf.predict(state=q["state"], question=q["question"], options=q["options"],
+                              media=f.name, modality="image")
+        ours = jev_probs(clf, make_inputs(clf.processor, q["images"],
+                                          prompt_fn(q["state"], q["question"], q["options"]), device),
+                         len(q["options"]))
+        worst = max(worst, max(abs(a - ref["probabilities"][o]) for a, o in zip(ours, q["options"])))
+    print(f"[jev] image-path equivalence vs official predict() on {len(items)} questions: max |dp| = {worst:.2e}", flush=True)
+    if worst > 1e-3:
         raise SystemExit("our image input path does not match Jev-Omni's predict(); aborting")
+    return worst
+
+
+def equivalence_items(k=20):
+    """k single-image questions spread over BLINK's single-image tasks and MMStar (distinct option strings)."""
+    items = []
+    for task in ("Counting", "Relative_Depth", "Spatial_Relation", "Object_Localization", "IQ_Test"):
+        for q in blink_questions([task]):
+            items.append(q)
+            if sum(i["task"] == task for i in items) == 2:
+                break
+    for q in mmstar_questions():
+        if len(set(q["options"])) == len(q["options"]):
+            items.append(q)
+        if len(items) >= k:
+            break
+    return items
 
 
 def main():
@@ -142,8 +174,15 @@ def main():
     out = a.out / f"{a.model}_{a.bench}{suffix}.jsonl"
     source = blink_questions(a.tasks) if a.bench == "blink" else mmstar_questions()
     done = {json.loads(line)["id"] for line in out.open()} if out.exists() else set()
+    checks = {"model": a.model, "bench": a.bench, "state_variant": a.state_variant}
     if a.model == "jev":
-        check_jev_equivalence(clf, next(blink_questions(["Counting"])), jev_omni._prompt, a.device)
+        checks["image_path_equivalence_n"] = 20
+        checks["image_path_equivalence_max_abs_dp"] = check_jev_equivalence(clf, equivalence_items(20), jev_omni._prompt, a.device)
+    # Untimed warm-up so the first recorded latency is not a cold start.
+    wq = next(blink_questions(["Counting"]))
+    for _ in range(2):
+        wi = make_inputs(processor, wq["images"], jev_omni._prompt(wq["state"], wq["question"], wq["options"]), a.device)
+        jev_probs(clf, wi, len(wq["options"])) if a.model == "jev" else base_probs(clf, wi, len(wq["options"]))
     per_task = {}
     with out.open("a") as fh:
         for q in source:
@@ -169,6 +208,10 @@ def main():
                 torch.cuda.synchronize()
             ms = (time.perf_counter() - t0) * 1000
             pred = max(range(n), key=probs.__getitem__)
+            top2 = sorted(probs, reverse=True)[:2]
+            extra["tie"] = top2[0] == top2[1]  # argmax then resolves to the lower index
+            if "n_options_source" in q:
+                extra["n_options_source"] = q["n_options_source"]
             rec = {"model": a.model, "split": a.bench, "l2": q.get("l2"), "id": q["id"], "task": q["task"],
                    "type": q["task"], "n_images": len(q["images"]), "n_options": n,
                    "n_tokens": int(inputs["input_ids"].shape[1]), "gold": q["gold"], "pred": pred,
@@ -179,6 +222,11 @@ def main():
             if per_task[q["task"]] == 1:
                 print(f"[{a.model}/{a.bench}] {q['task']} first: n_img={len(q['images'])} "
                       f"tokens={rec['n_tokens']} ms={ms:.0f}", flush=True)
+    if a.model == "base":
+        checks.update(clf.checks)
+    if a.bench == "mmstar":
+        checks["mmstar_skipped_gold_is_nan"] = MMSTAR_SKIPPED
+    (a.out / f"checks_{a.bench}{suffix}_{a.model}.json").write_text(json.dumps(checks, indent=1))
 
 
 if __name__ == "__main__":
