@@ -1,0 +1,20 @@
+[project]
+name = "jev-omni-eval"
+version = "0.1.0"
+description = "What Jev-Omni's decision head buys: three readouts of one Gemma 4 12B forward pass on DecisionBench, BLINK and MMStar, with calibration and temperature scaling."
+requires-python = ">=3.12"
+dependencies = [
+    "torch==2.14.*",
+    "torchvision==0.29.*",
+    "transformers==5.17.0",
+    "accelerate",
+    "huggingface-hub",
+    "safetensors",
+    "numpy",
+    "pillow",
+    "opencv-python-headless",
+    "soundfile",
+    "librosa",
+    "pandas",
+    "pyarrow",
+]
